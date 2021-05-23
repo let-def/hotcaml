@@ -1,0 +1,5 @@
+(executable
+ (name hotcaml)
+ (modes byte)
+ (flags :standard -linkall)
+ (libraries unix threads.posix compiler-libs.toplevel findlib.top))

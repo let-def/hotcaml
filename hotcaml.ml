@@ -41,19 +41,19 @@ let () =
   ()
 
 let () =
-  let all = ref [] in
+  (*let all = ref [] in
   let _ = Symtable.filter_global_map (fun ident ->
       all := ident :: !all;
       true
     ) (Symtable.current_state ())
-  in
+  in*)
   (*List.iter prerr_endline !Topfind.predicates;*)
   begin try
       Topfind.load_deeply (List.rev !packages);
     with exn ->
       Format.printf "%a\n%!" Location.report_exception exn
   end;
-  let added = ref [] in
+  (*let added = ref [] in
   let _ =
     Symtable.filter_global_map (fun ident ->
         if not (List.mem ident !all) then
@@ -62,7 +62,7 @@ let () =
       ) (Symtable.current_state ())
   in
   List.iter (fun ident -> Format.printf "added %a\n" Ident.print ident)
-    !added
+    !added*)
 
 (* ** *)
 
@@ -70,6 +70,7 @@ module File_id : sig
   type t
   val missing : t
   val identify : string -> t
+  val identify_option : string option -> t
   val same : t -> t -> bool
 end = struct
 
@@ -94,32 +95,38 @@ end = struct
       a.st_ctime = b.st_ctime &&
       a.st_mtime = b.st_mtime &&
       a.st_size = b.st_size
+
+  let identify_option = function
+    | None -> missing
+    | Some name -> identify name
 end
 
 module Hotpath : sig
-  val refresh : unit -> unit
   val find : string -> string option
+  val changed : unit -> bool
 end = struct
-
   let path =
     ref (List.map (fun path -> path, File_id.missing, [||]) !load_path)
 
   let cache = Hashtbl.create 7
 
-  let refresh () =
-    Hashtbl.clear cache;
+  let changed () =
+    let changed = ref false in
     path := List.map (fun (path, id, files) ->
         (*Printf.eprintf "refresh path %S\n" path;*)
         let id' = File_id.identify path in
         if File_id.same id id' then
           (path, id, files)
-        else
-          (path, id',
-           try Sys.readdir path
-           with Sys_error _ -> [||])
-      ) !path
+        else (
+          changed := true;
+          let files = try Sys.readdir path with Sys_error _ -> [||] in
+          (path, id', files)
+        )
+      ) !path;
+    if !changed then Hashtbl.clear cache;
+    !changed
 
-  let () = refresh ()
+  let _ : bool = changed ()
 
   let eq_mod_cap str1 str2 =
     (*Printf.eprintf "eq_mod_cap %S %S\n%!" str1 str2;*)
@@ -215,15 +222,10 @@ end = struct
           in
           Some path, mli_file
     in
-    let identify = function
-      | None -> File_id.missing
-      | Some name -> File_id.identify name
-    in
-    let implementation_id = identify implementation in
-    let interface_id = identify interface in
-    { name;
-      implementation; implementation_id;
-      interface; interface_id;
+    {
+      name; implementation; interface;
+      implementation_id = File_id.identify_option implementation;
+      interface_id = File_id.identify_option interface;
     }
 end
 
@@ -278,12 +280,14 @@ end = struct
 
 end
 
+module String = Depend.String
+
 module Hotdepend : sig
-  val dependencies : Parsetree.structure -> Depend.String.Set.t
+  val dependencies : Parsetree.structure -> String.Set.t
 end = struct
   let dependencies str =
-    Depend.free_structure_names := Depend.String.Set.empty;
-    Depend.add_implementation Depend.String.Map.empty str;
+    Depend.free_structure_names := String.Set.empty;
+    Depend.add_implementation String.Map.empty str;
     !Depend.free_structure_names
 end
 
@@ -293,12 +297,14 @@ module Hotresolver : sig
     implementation: Hotparser.implementation;
     interface: Hotparser.interface;
     composed: Hotparser.implementation;
-    depends: Depend.String.Set.t;
+    depends: String.Set.t;
   }
 
-  type program = program_unit Depend.String.Map.t
+  type program = program_unit String.Map.t
+  val empty : program
 
   val resolve : ?previous:program -> string list -> program
+  val changed : program -> bool
 end = struct
 
   type program_unit = {
@@ -306,13 +312,13 @@ end = struct
     implementation: Hotparser.implementation;
     interface: Hotparser.interface;
     composed: Hotparser.implementation;
-    depends: Depend.String.Set.t;
+    depends: String.Set.t;
   }
 
-  type program = program_unit Depend.String.Map.t
+  type program = program_unit String.Map.t
 
   let update_unit previous name =
-    let previous = Depend.String.Map.find_opt name previous in
+    let previous = String.Map.find_opt name previous in
     let source = Hotfinder.find name in
     let implementation, impl_reused =
       match previous with
@@ -349,32 +355,42 @@ end = struct
       | Some _ | None ->
         match composed with
         | Result.Ok (Some ast) -> Hotdepend.dependencies ast
-        | Result.Ok None | Result.Error _ -> Depend.String.Set.empty
+        | Result.Ok None | Result.Error _ -> String.Set.empty
     in
     { source; implementation; interface; composed; depends }
 
-  let empty = Depend.String.Map.empty
+  let empty = String.Map.empty
 
   let resolve ?(previous=empty) entrypoints =
     let rec load mod_name program =
-      if Depend.String.Map.mem mod_name program then program else
+      if String.Map.mem mod_name program then program else
         let p_unit = update_unit previous mod_name in
-        let program = Depend.String.Map.add mod_name p_unit program in
-        Depend.String.Set.fold load p_unit.depends program
+        let program = String.Map.add mod_name p_unit program in
+        String.Set.fold load p_unit.depends program
     in
     List.fold_right load entrypoints empty
+
+  let changed (program: program) = not (
+      String.Map.for_all (fun _ {source; _} ->
+          File_id.same source.implementation_id
+            (File_id.identify_option source.implementation) &&
+          File_id.same source.interface_id
+            (File_id.identify_option source.interface)
+        ) program
+    )
 end
 
 module Hotorder : sig
-  val order : Hotresolver.program ->
-    string list -> (string list, [`Cycle of string * string list]) Result.t
+  type t = string list
+  val order : Hotresolver.program -> string list -> (t, string) Result.t
 end = struct
+  type t = string list
 
-  type ordered_set = string list * Depend.String.Set.t
-  let empty : ordered_set = ([], Depend.String.Set.empty)
-  let mem s (_, set : ordered_set ) = Depend.String.Set.mem s set
+  type ordered_set = string list * String.Set.t
+  let empty : ordered_set = ([], String.Set.empty)
+  let mem s (_, set : ordered_set ) = String.Set.mem s set
   let add s set : ordered_set = if mem s set then set else
-      let (l, ss) = set in (s :: l, Depend.String.Set.add s ss)
+      let (l, ss) = set in (s :: l, String.Set.add s ss)
 
   exception Cycle of string * string list
 
@@ -386,9 +402,9 @@ end = struct
         raise (Cycle (name, fst stack))
       else
         let stack = add name stack in
-        let p_unit = Depend.String.Map.find name program in
+        let p_unit = String.Map.find name program in
         let order =
-          Depend.String.Set.fold (visit stack) p_unit.Hotresolver.depends order
+          String.Set.fold (visit stack) p_unit.Hotresolver.depends order
         in
         add name order
     in
@@ -399,14 +415,24 @@ end = struct
       in
       Ok (List.rev order)
     with Cycle (node, stack) ->
-      Error (`Cycle (node, stack))
+      let rec extract = function
+        | [] -> assert false
+        | node' :: xs ->
+          if node = node'
+          then [node]
+          else node' :: extract xs
+      in
+      Error (
+        Printf.sprintf "Cyclic dependency found: %s"
+          (String.concat " -> " (node :: extract stack))
+      )
 
 end
 
 module Hottyper : sig
   type program_unit =
     | Present of {
-        depends: program_unit Depend.String.Map.t;
+        depends: program_unit String.Map.t;
         parsetree: Parsetree.structure;
         typedtree_env: Env.t;
         typedtree: Typedtree.structure;
@@ -414,7 +440,8 @@ module Hottyper : sig
       }
     | Absent
 
-  type program = (program_unit, exn) result Depend.String.Map.t
+  type program = (program_unit, exn) result String.Map.t
+  val empty : program
 
   val typecheck :
     ?previous:program -> Hotresolver.program -> string list -> program
@@ -422,7 +449,7 @@ end = struct
 
   type program_unit =
     | Present of {
-        depends: program_unit Depend.String.Map.t;
+        depends: program_unit String.Map.t;
         parsetree: Parsetree.structure;
         typedtree_env: Env.t;
         typedtree: Typedtree.structure;
@@ -430,9 +457,9 @@ end = struct
       }
     | Absent
 
-  type program = (program_unit, exn) result Depend.String.Map.t
+  type program = (program_unit, exn) result String.Map.t
 
-  let empty = Depend.String.Map.empty
+  let empty = String.Map.empty
 
   let initial_env = Compmisc.initial_env ()
 
@@ -446,7 +473,7 @@ end = struct
 
   let typecheck_with_depends depends pstr =
     let env =
-      Depend.String.Map.fold (fun _ dep env ->
+      String.Map.fold (fun _ dep env ->
           match dep with
           | Absent -> env
           | Present t-> Env.add_signature t.signature env
@@ -455,25 +482,25 @@ end = struct
     just_typecheck env pstr
 
   let typecheck_module previous source (program : program) mod_name =
-    let s_unit = Depend.String.Map.find mod_name source in
+    let s_unit = String.Map.find mod_name source in
     match s_unit.Hotresolver.composed with
     | Error _ -> None
     | Ok None -> Some (Ok Absent)
     | Ok (Some parsetree) ->
       match
-        Depend.String.Set.fold (fun mod_name acc ->
-            match Depend.String.Map.find mod_name program with
-            | Ok t_unit -> Depend.String.Map.add mod_name t_unit acc
+        String.Set.fold (fun mod_name acc ->
+            match String.Map.find mod_name program with
+            | Ok t_unit -> String.Map.add mod_name t_unit acc
             | Error _ -> raise Not_found
-          ) s_unit.Hotresolver.depends Depend.String.Map.empty
+          ) s_unit.Hotresolver.depends String.Map.empty
       with
       | exception Not_found -> None
       | depends ->
         Option.some @@
-        match Depend.String.Map.find_opt mod_name previous with
+        match String.Map.find_opt mod_name previous with
         | Some (Ok (Present previous) as result) when
             previous.parsetree == parsetree &&
-            Depend.String.Map.equal (==) previous.depends depends ->
+            String.Map.equal (==) previous.depends depends ->
           result
         | Some _ | None ->
           match typecheck_with_depends depends parsetree with
@@ -487,46 +514,142 @@ end = struct
     List.fold_left (fun program mod_name ->
         match typecheck_module previous source program mod_name with
         | None -> program
-        | Some t_unit -> Depend.String.Map.add mod_name t_unit program
+        | Some t_unit -> String.Map.add mod_name t_unit program
       ) empty modules
 
 end
 
+module Hoterrors : sig
+  val validate_parse : Hotresolver.program -> Hotorder.t -> (unit, string) result
+  val validate_types : Hottyper.program -> Hotorder.t -> (unit, string) result
+end = struct
+  let validate_parse program order =
+    let first_error mod_name =
+      let {Hotresolver. implementation; interface; _} =
+        String.Map.find mod_name program
+      in
+      match implementation, interface with
+      | (Result.Error exn, _) | (_, Result.Error exn) ->
+        Some (Format.asprintf "%a" Location.report_exception exn)
+      | _ -> None
+    in
+    match List.find_map first_error order with
+    | None -> Ok ()
+    | Some msg -> Error msg
+
+  let validate_types (program: Hottyper.program) order =
+    let first_error mod_name =
+      match String.Map.find mod_name program with
+      | Result.Ok _ -> None
+      | Result.Error exn ->
+        Some (Format.asprintf "%a" Location.report_exception exn)
+    in
+    match List.find_map first_error order with
+    | None -> Ok ()
+    | Some msg -> Error msg
+end
+
+module Hotloader : sig
+  type program
+  val empty : program
+  val load : ?previous:program -> Hottyper.program -> Hotorder.t ->
+    program * (unit, string) result
+end = struct
+  type program = (string * Hottyper.program_unit) list
+  let empty = []
+
+  let unload_previous program previous =
+    let still_loaded =
+        List.fold_left (fun acc (name, prev) ->
+            let need_unload =
+              match String.Map.find_opt name program with
+              | Some p_unit -> Result.get_ok p_unit != prev
+              | None -> true
+            in
+            if need_unload then (
+              (*TODO*)
+              prerr_endline ("Unloading " ^ name);
+              acc
+            ) else
+              String.Map.add name prev acc
+          ) String.Map.empty previous
+    in
+    still_loaded
+
+  let load_new loaded program order =
+    let exception Failed of Hottyper.program_unit String.Map.t * string in
+    let load_unit loaded name =
+      if String.Map.mem name loaded then
+        loaded
+      else
+        let p_unit = Result.get_ok (String.Map.find name program) in
+        match p_unit with
+        | Hottyper.Absent -> String.Map.add name p_unit loaded
+        | Hottyper.Present t ->
+          try
+            let lam = Translmod.transl_toplevel_definition t.typedtree in
+            let slam = Simplif.simplify_lambda lam in
+            let init_code, fun_code = Bytegen.compile_phrase slam in
+            let (code, reloc, events) =
+              Emitcode.to_memory init_code fun_code
+            in
+            Symtable.patch_object code reloc;
+            Symtable.check_global_initialized reloc;
+            Symtable.update_global_table();
+            (*let initial_bindings = !toplevel_value_bindings in*)
+            let _bytecode, closure = Meta.reify_bytecode code [| events |] None in
+            ignore (closure () : Obj.t);
+            prerr_endline ("Loaded " ^ name);
+            String.Map.add name p_unit loaded
+          with exn ->
+            let message =
+              Format.asprintf "%s compilation failed: %a\n%!"
+                name Location.report_exception exn
+            in
+            raise (Failed (loaded, message))
+    in
+    let get_program loaded order =
+      List.map (fun name ->
+          name,
+          match String.Map.find_opt name loaded with
+          | None -> Hottyper.Absent
+          | Some p_unit -> p_unit
+        ) order
+    in
+    let loaded, result =
+      match List.fold_left load_unit loaded order with
+      | loaded -> loaded, Ok ()
+      | exception (Failed (loaded, msg)) -> loaded, Error msg
+    in
+    (get_program loaded order, result)
+
+  let load ?(previous=(empty : program)) (program : Hottyper.program) order =
+    let still_loaded = unload_previous program previous in
+    load_new still_loaded program order
+
+end
+
+
 let () =
-  let source_program = Hotresolver.resolve entrypoints in
-  (*Depend.String.Map.iter (fun name p_unit ->
-      Printf.printf "loaded %s\ndependencies:\n" name;
-      Depend.String.Set.iter (Printf.printf "  %s\n") p_unit.Hotresolver.depends;
-    ) source_program;
-  Printf.printf "load order:\n";*)
-  match Hotorder.order source_program entrypoints with
-  | Error _ -> ()
-  | Ok order ->
-    (*List.iter (Printf.printf "  %s\n") (List.rev order);*)
-    let types = Hottyper.typecheck source_program order in
-    List.iter (fun name ->
-        match Depend.String.Map.find_opt name types with
-        | None -> ()
-        | Some typ ->
-          match typ with
-          | Ok Hottyper.Absent -> () (*Printf.printf "%s is absent\n" name*)
-          | Error exn ->
-            Format.printf "%s failed: %a\n%!" name Location.report_exception exn
-          | Ok (Hottyper.Present t) ->
-            try
-              (*Printf.printf "%s is present\n" name;*)
-              let lam = Translmod.transl_toplevel_definition t.typedtree in
-              let slam = Simplif.simplify_lambda lam in
-              let init_code, fun_code = Bytegen.compile_phrase slam in
-              let (code, reloc, events) =
-                Emitcode.to_memory init_code fun_code
-              in
-              Symtable.patch_object code reloc;
-              Symtable.check_global_initialized reloc;
-              Symtable.update_global_table();
-              (*let initial_bindings = !toplevel_value_bindings in*)
-              let _bytecode, closure = Meta.reify_bytecode code [| events |] None in
-              ignore (closure () : Obj.t)
-            with exn ->
-              Format.printf "%s compilation failed: %a\n%!" name Location.report_exception exn
-      ) order
+  let source = ref Hotresolver.empty in
+  let typed = ref Hottyper.empty in
+  let loaded = ref Hotloader.empty in
+  let process () =
+    source := Hotresolver.resolve ~previous:!source entrypoints;
+    Result.bind (Hotorder.order !source entrypoints) @@ fun order ->
+    Result.bind (Hoterrors.validate_parse !source order) @@ fun () ->
+    typed := Hottyper.typecheck ~previous:!typed !source order;
+    Result.bind (Hoterrors.validate_types !typed order) @@ fun () ->
+    let loaded', result = Hotloader.load ~previous:!loaded !typed order in
+    loaded := loaded';
+    result
+  in
+  while true do
+    begin match process () with
+      | Ok () -> ()
+      | Error msg -> prerr_endline msg
+    end;
+    while not (Hotpath.changed () || Hotresolver.changed !source) do
+      Unix.sleepf 0.05
+    done;
+  done

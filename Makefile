@@ -1,2 +1,2 @@
 all:
-	dune build ./hotcaml.exe
+	dune build ./hotcaml.exe ./hotcaml_lwt.exe

@@ -1,5 +1,13 @@
 (executable
  (name hotcaml)
+ (modules hotcaml)
  (modes byte)
  (flags :standard -linkall)
  (libraries unix threads.posix compiler-libs.toplevel findlib.top))
+
+(executable
+ (name hotcaml_lwt)
+ (modules hotcaml_lwt)
+ (modes byte)
+ (flags :standard -linkall)
+ (libraries unix threads.posix compiler-libs.toplevel findlib.top lwt lwt.unix))

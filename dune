@@ -1,5 +1,6 @@
 (executable
  (name hotcaml)
+ (public_name hotcaml)
  (modules hotcaml)
  (modes byte)
  (flags :standard -linkall)
@@ -7,6 +8,7 @@
 
 (executable
  (name hotcaml_lwt)
+ (public_name hotcaml-lwt)
  (modules hotcaml_lwt)
  (modes byte)
  (flags :standard -linkall)
@@ -14,5 +16,6 @@
 
 (library
  (name hotlink)
+ (public_name hotcaml.hotlink)
  (wrapped false)
  (modules hotlink))

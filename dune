@@ -11,3 +11,8 @@
  (modes byte)
  (flags :standard -linkall)
  (libraries unix threads.posix compiler-libs.toplevel findlib.top lwt lwt.unix))
+
+(library
+ (name hotlink)
+ (wrapped false)
+ (modules hotlink))

@@ -12,6 +12,56 @@ let arg_specs = [
   "<pkg>  Load findlib package <pkg>";
 ]
 
+module Hotlink = struct
+  module type S = sig
+    val is_hot_loaded : unit -> bool
+    val is_hot_unloaded : unit -> bool
+
+    val on_unload : (unit -> unit) -> unit
+    val on_unload_or_at_exit : (unit -> unit) -> unit
+  end
+
+  let interface = "
+    val is_hot_loaded : unit -> bool
+    val is_hot_unloaded : unit -> bool
+
+    val on_unload : (unit -> unit) -> unit
+    val on_unload_or_at_exit : (unit -> unit) -> unit
+  "
+
+  type status = {
+    mutable unloaded: bool;
+    mutable on_unload : (unit -> unit) list;
+  }
+
+  let make () : status * (module S) =
+    let status = {
+      unloaded = false;
+      on_unload = [];
+    } in
+    (status, (module struct
+       let is_hot_loaded () = true
+       let is_hot_unloaded () = status.unloaded
+       let on_unload f =
+         if status.unloaded then
+           f ()
+         else
+           status.on_unload <- f :: status.on_unload
+       let on_unload_or_at_exit = on_unload
+     end))
+
+  let unload name s =
+    let fs = s.on_unload in
+    s.unloaded <- true;
+    s.on_unload <- [];
+    List.iter (fun f ->
+        try f ()
+        with exn ->
+          Printf.eprintf "Exception while unloading %s:\n%s\n"
+            name (Printexc.to_string exn)
+      ) fs
+end
+
 let () =
   Arg.parse arg_specs (push_front entrypoints)
     (Printf.sprintf
@@ -285,9 +335,11 @@ module String = Depend.String
 module Hotdepend : sig
   val dependencies : Parsetree.structure -> String.Set.t
 end = struct
+  let bound = String.Map.singleton "Hotlink"
+      (Depend.Node (String.Set.empty, String.Map.empty))
   let dependencies str =
     Depend.free_structure_names := String.Set.empty;
-    Depend.add_implementation String.Map.empty str;
+    Depend.add_implementation bound str;
     !Depend.free_structure_names
 end
 
@@ -463,6 +515,16 @@ end = struct
 
   let initial_env = Compmisc.initial_env ()
 
+  let hotlink =
+    let lexbuf = Lexing.from_string Hotlink.interface in
+    let sg = Parser.interface Lexer.token lexbuf in
+    (Typemod.transl_signature initial_env sg).sig_type
+
+  let hotlink_ident = Ident.create_local "Hotlink"
+
+  let add_hotlink env =
+    Env.add_module hotlink_ident Mp_present (Types.Mty_signature hotlink) env
+
   let just_typecheck env pstr =
     Typecore.reset_delayed_checks ();
     let (str, sg, sn, newenv) = Typemod.type_toplevel_phrase env pstr in
@@ -472,12 +534,13 @@ end = struct
     (env, str, sg)
 
   let typecheck_with_depends depends pstr =
+    let env = add_hotlink initial_env in
     let env =
       String.Map.fold (fun _ dep env ->
           match dep with
           | Absent -> env
           | Present t-> Env.add_signature t.signature env
-        ) depends initial_env
+        ) depends env
     in
     just_typecheck env pstr
 
@@ -555,41 +618,51 @@ module Hotloader : sig
   val load : ?previous:program -> Hottyper.program -> Hotorder.t ->
     program * (unit, string) result
 end = struct
-  type program = (string * Hottyper.program_unit) list
+  type link_map = (Hottyper.program_unit * Hotlink.status option) String.Map.t
+  type program = (string * (Hottyper.program_unit * Hotlink.status option)) list
   let empty = []
 
-  let unload_previous program previous =
+  let unload_previous (program : Hottyper.program) (previous : program)
+    : link_map
+    =
     let still_loaded =
-        List.fold_left (fun acc (name, prev) ->
-            let need_unload =
-              match String.Map.find_opt name program with
-              | Some p_unit -> Result.get_ok p_unit != prev
-              | None -> true
-            in
-            if need_unload then (
-              (*TODO*)
-              prerr_endline ("Unloading " ^ name);
-              acc
-            ) else
-              String.Map.add name prev acc
-          ) String.Map.empty previous
+      List.fold_left (fun acc (name, (prev, link)) ->
+          let need_unload =
+            match String.Map.find_opt name program with
+            | Some p_unit -> Result.get_ok p_unit != prev
+            | None -> true
+          in
+          if need_unload then (
+            begin match link with
+              | None -> ()
+              | Some link ->
+                prerr_endline ("Unloading " ^ name);
+                Hotlink.unload name link;
+            end;
+            acc
+          ) else
+            String.Map.add name (prev, link) acc
+        ) String.Map.empty previous
     in
     still_loaded
 
+  exception Failed of link_map * string
+
   let load_new loaded program order =
-    let exception Failed of Hottyper.program_unit String.Map.t * string in
     let load_unit loaded name =
       if String.Map.mem name loaded then
         loaded
       else
         let p_unit = Result.get_ok (String.Map.find name program) in
         match p_unit with
-        | Hottyper.Absent -> String.Map.add name p_unit loaded
+        | Hottyper.Absent -> String.Map.add name (p_unit, None) loaded
         | Hottyper.Present t ->
+          let status, link = Hotlink.make () in
           try
             let lam = Translmod.transl_toplevel_definition t.typedtree in
             let slam = Simplif.simplify_lambda lam in
             let init_code, fun_code = Bytegen.compile_phrase slam in
+            Toploop.setvalue "Hotlink" (Obj.repr link);
             let (code, reloc, events) =
               Emitcode.to_memory init_code fun_code
             in
@@ -600,20 +673,21 @@ end = struct
             let _bytecode, closure = Meta.reify_bytecode code [| events |] None in
             ignore (closure () : Obj.t);
             prerr_endline ("Loaded " ^ name);
-            String.Map.add name p_unit loaded
+            String.Map.add name (p_unit, Some status) loaded
           with exn ->
             let message =
               Format.asprintf "%s compilation failed: %a\n%!"
                 name Location.report_exception exn
             in
+            Hotlink.unload name status;
             raise (Failed (loaded, message))
     in
     let get_program loaded order =
       List.map (fun name ->
           name,
           match String.Map.find_opt name loaded with
-          | None -> Hottyper.Absent
-          | Some p_unit -> p_unit
+          | None -> Hottyper.Absent, None
+          | Some (p_unit, link) -> p_unit, link
         ) order
     in
     let loaded, result =
@@ -629,6 +703,10 @@ end = struct
 
 end
 
+let quit = ref false
+
+let () =
+  Sys.set_signal Sys.sigint (Sys.Signal_handle (fun _ -> quit := true))
 
 let () =
   let source = ref Hotresolver.empty in

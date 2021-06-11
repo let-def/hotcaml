@@ -407,7 +407,11 @@ end = struct
       | Some _ | None ->
         match composed with
         | Result.Ok (Some ast) -> Hotdepend.dependencies ast
-        | Result.Ok None | Result.Error _ -> String.Set.empty
+        | Result.Ok None -> String.Set.empty
+        | Result.Error _ ->
+          match previous with
+          | None -> String.Set.empty
+          | Some previous -> previous.depends
     in
     { source; implementation; interface; composed; depends }
 

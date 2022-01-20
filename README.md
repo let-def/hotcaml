@@ -1,7 +1,7 @@
 # Hotcaml: an OCaml interpreter with watching and reloading
 
-Hotcaml is an OCaml interpreter that starts from a source file and loads it dependencies.
-When one of the source file changes and passes the typechecker, it is reloaded, as well as all its reverse dependencies.
+Hotcaml is an OCaml interpreter that starts from a source file and loads its dependencies.
+When one of the source files changes and passes the typechecker, it is reloaded, along with all of its reverse dependencies.
 
 To get started, clone the repository and type `make`. Two frontends are built: `hotcaml.exe` and `hotcaml_lwt.exe`.
 
@@ -10,23 +10,23 @@ To get started, clone the repository and type `make`. Two frontends are built: `
 An `hotcaml` invocation takes three kinds of arguments:
 `hotcaml [ -package pkg ]* [ -I path ]* entrypoint.ml*`  
 
-The `pkg` 's should be valid `findlib` package names. They will be loaded in order during startup.
+The `pkg`s should be valid `findlib` package names. They will be loaded in order during startup.
 
-The `path`'s are paths that will be looked up for dependencies.
+The `path`s are paths that will be looked up for dependencies.
 
 Finally, the entrypoints are the actual code that we want to interpret.
 
-Each entrypoint is loaded and interpreted in order. Dependencies of an entrypoint are looked up in the `path`'s and then in the loaded packages.
+Each entrypoint is loaded and interpreted in order. Dependencies of an entrypoint are looked up in the `path`s and then in the loaded packages.
 
-Once execution of the entrypoints is done, the interpreter will watch the disk for changes. If one of the source file change, it is reloaded and interpretation resumes from this module, followed by all its reverse dependencies.
+Once execution of the entrypoints is done, the interpreter will watch the disk for changes. If one of the source files changes, it is reloaded and interpretation resumes from this module, followed by all of its reverse dependencies.
 
-If one of the dependency does not typecheck, reloading is postponed until all errors are solved.
+If one of the dependencies does not typecheck, reloading is postponed until all errors are solved.
 
 ## Synchronous and asynchronous frontends
 
-Contrary to the normal execution of an OCaml program, modules can be loaded and unloaded, multiples times, during the execution.
+Contrary to the normal execution of an OCaml program, modules can be loaded and unloaded, multiple times during the execution.
 
-The synchronous `hotcaml` only look for changes after execution is done. This is not really convenient for interactive programs, where we might want to reload during execution rather than after.
+The synchronous `hotcaml` only looks for changes after execution finishes. This is not really convenient for interactive programs, where we might want to reload during execution rather than after.
 
 `hotcaml_lwt` provides an asynchronous frontend: lwt threads continue to execute after loading, and modules can be reloaded concurrentlly.
 
@@ -50,4 +50,4 @@ In a normal, "cold" execution, the `Hotlink` module exhibits a compatible, reaso
 - `Hotlink.on_unload` does nothing
 - `Hotlink.on_unload_or_at_exit` behaves like `at_exit`
 
-This allows to have modules that are compatible with both classical OCaml and with hotcaml, and adjust their behavior based on the situation.
+This allows modules that are compatible with both classical OCaml and with hotcaml, and adjusts their behavior based on the situation.

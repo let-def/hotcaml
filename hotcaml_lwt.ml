@@ -530,7 +530,7 @@ end = struct
 
   let just_typecheck env pstr =
     Typecore.reset_delayed_checks ();
-    let (str, sg, sn, newenv) = Typemod.type_toplevel_phrase env pstr in
+    let (str, sg, sn, _, newenv) = Typemod.type_toplevel_phrase env pstr in
     let sg' = Typemod.Signature_names.simplify newenv sn sg in
     ignore (Includemod.signatures ~mark:Mark_positive env sg sg');
     Typecore.force_delayed_checks ();
